@@ -254,18 +254,217 @@ func BicepTemplate(name string, manifest *Manifest, options AppHostOptions) (*me
 			mapToResourceParams = append(mapToResourceParams, input)
 		}
 	}
-	context := bicepContext{
+
+		context := bicepContext{
 		genBicepTemplateContext: generator.bicepContext,
 		WithMetadataParameters:  parameters,
 		MainToResourcesParams:   mapToResourceParams,
 	}
-	if err := executeToFS(fs, genTemplates, "main.bicep", name+".bicep", context); err != nil {
+
+		if err := executeToFS(fs, genTemplates, "main.bicep", name+".bicep", context); err != nil {
 		return nil, fmt.Errorf("generating infra/main.bicep: %w", err)
 	}
 
-	if err := executeToFS(fs, genTemplates, "resources.bicep", "resources.bicep", context); err != nil {
-		return nil, fmt.Errorf("generating infra/resources.bicep: %w", err)
+
+	resouceBicep := `@description('The location used for all deployed resources')
+param location string = resourceGroup().location
+@description('Id of the user or app to assign application roles')
+param principalId string = ''
+
+
+@description('Tags that will be applied to all resources')
+param tags object = {}
+
+var resourceToken = uniqueString(resourceGroup().id)
+
+resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: 'mi-${resourceToken}'
+  location: location
+  tags: tags
+}
+
+resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: replace('acr-${resourceToken}', '-', '')
+  location: location
+  sku: {
+    name: 'Basic'
+  }
+  properties: {
+    adminUserEnabled: true
+  }
+  tags: tags
+}
+
+resource caeMiRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(containerRegistry.id, managedIdentity.id, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d'))
+  scope: containerRegistry
+  properties: {
+    principalId: managedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId:  subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+  }
+}
+
+@description('Web app name.')
+@minLength(2)
+param webAppName string = 'aspireapp-${uniqueString(resourceGroup().id)}'
+
+@description('The SKU of App Service Plan.')
+param sku string = 'P2V3'
+
+var appServicePlanName = 'AppServicePlan-${webAppName}'
+
+resource appServicePlan 'Microsoft.Web/serverfarms@2021-02-01' = {
+  name: appServicePlanName
+  location: location
+  sku: {
+    name: sku
+  }
+  kind: 'linux'
+  properties: {
+    reserved: true
+  }
+}
+
+resource webApp 'Microsoft.Web/sites@2021-02-01' = {
+  name: webAppName
+  location: location
+  properties: {
+    httpsOnly: true
+    serverFarmId: appServicePlan.id
+    siteConfig: {
+      linuxFxVersion: 'sitecontainers'
+      minTlsVersion: '1.2'
+      ftpsState: 'FtpsOnly'
+      appSettings: [
+      {
+        name: 'ConnectionStrings__cache'
+        value: 'localhost:6379'
+      }
+      {
+        name: 'DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS'
+        value: 'true'
+      }
+      {
+        name: 'OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EVENT_LOG_ATTRIBUTES'
+        value: 'true'
+      }
+      {
+        name: 'OTEL_DOTNET_EXPERIMENTAL_OTLP_EMIT_EXCEPTION_LOG_ATTRIBUTES'
+        value: 'true'
+      }
+      {
+        name: 'OTEL_DOTNET_EXPERIMENTAL_OTLP_RETRY'
+        value: 'true'
+      }
+      {
+        name: 'OTEL_EXPORTER_OTLP_ENDPOINT'
+        value: 'http://localhost:18889'
+      }
+      {
+        name: 'services__apiservice__http__0'
+        value: 'http://localhost:8888'
+      }
+      ]
+    }
+  }
+  identity: {
+    type: 'SystemAssigned'
+  }
+}
+
+resource webAppContainer_nginx 'Microsoft.Web/sites/sitecontainers@2021-02-01' = {
+  parent: webApp
+  name: 'nginx'
+  properties: {
+    image: 'docker.io/sarthaksharma2199/aspirenginx:latest'
+    targetPort: '80'
+    isMain: true
+    authType: 'Anonymous'
+  }
+}
+
+resource webAppContainer_frontend 'Microsoft.Web/sites/sitecontainers@2021-02-01' = {
+  parent: webApp
+  name: 'frontend'
+  properties: {
+    image: 'docker.io/sarthaksharma2199/aspiresample-web:latest'
+    targetPort: '8080'
+    isMain: false
+    authType: 'Anonymous'
+    environmentVariables: [
+                {
+                    name: 'OTEL_SERVICE_NAME'
+                    value: 'frontend'
+                }
+            ]
+  }
+}
+
+resource webAppContainer_apiservice 'Microsoft.Web/sites/sitecontainers@2021-02-01' = {
+  parent: webApp
+  name: 'apiservice'
+  properties: {
+    image: 'docker.io/sarthaksharma2199/aspiresample-apiservice:latest'
+    targetPort: '8888'
+    isMain: false
+    authType: 'Anonymous'
+    environmentVariables: [
+                {
+                    name: 'OTEL_SERVICE_NAME'
+                    value: 'apiservice'
+                }
+            ]
+  }
+}
+
+resource webAppContainer_cache 'Microsoft.Web/sites/sitecontainers@2021-02-01' = {
+  parent: webApp
+  name: 'cache'
+  properties: {
+    image: 'docker.io/redis:7.2'
+    targetPort: '6379'
+    isMain: false
+    authType: 'Anonymous'
+  }
+}
+
+resource webAppContainer_dashboard 'Microsoft.Web/sites/sitecontainers@2021-02-01' = {
+  parent: webApp
+  name: 'dashboard'
+  properties: {
+    image: 'mcr.microsoft.com/dotnet/aspire-dashboard:8.0.0'
+    targetPort: '18888'
+    isMain: false
+    authType: 'Anonymous'
+  }
+}
+
+
+
+output MANAGED_IDENTITY_CLIENT_ID string = managedIdentity.properties.clientId
+output MANAGED_IDENTITY_NAME string = managedIdentity.name
+output MANAGED_IDENTITY_PRINCIPAL_ID string = managedIdentity.properties.principalId
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = containerRegistry.properties.loginServer
+output AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID string = managedIdentity.id
+output AZURE_WEBAPP_NAME string = webApp.id
+
+`
+
+	buf := bytes.Buffer{}
+	buf.WriteString(resouceBicep)
+
+	if err := fs.MkdirAll(filepath.Dir("resources.bicep"), osutil.PermissionDirectory); err != nil {
+		return nil , fmt.Errorf("creating directory: %w", err)
 	}
+
+	if err := fs.WriteFile("resources.bicep", buf.Bytes(), osutil.PermissionFile); err != nil {
+		return nil, fmt.Errorf("writing file: %w", err)
+	}
+
+	// if err := executeToFS(fs, genTemplates, "resources.bicep", "resources.bicep", context); err != nil {
+	// 	return nil, fmt.Errorf("generating infra/resources.bicep: %w", err)
+	// }
 
 	if err := executeToFS(
 		fs, genTemplates, "main.parameters.json", name+".parameters.json", generator.bicepContext); err != nil {

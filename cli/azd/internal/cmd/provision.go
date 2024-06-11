@@ -366,7 +366,7 @@ func (p *ProvisionAction) Run(ctx context.Context) (*actions.ActionResult, error
 	return &actions.ActionResult{
 		Message: &actions.ResultMessage{
 			Header: fmt.Sprintf(
-				"Your application was provisioned in Azure in %s.", ux.DurationAsText(since(startTime))),
+				"Your application was provisioned in Azure"),
 			FollowUp: getResourceGroupFollowUp(
 				ctx,
 				p.formatter,
